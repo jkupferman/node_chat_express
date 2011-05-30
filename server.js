@@ -49,10 +49,57 @@ app.get('/join', function(req, res){
                             200));
 });
 
+app.get("/part", function (req, res) {
+    var id = qs.parse(url.parse(req.url).query).id;
+    var session;
+    if (id && sessions[id]) {
+        session = sessions[id];
+        session.destroy();
+    }
+    res.send(JSON.stringify({ rss: mem.rss }), 200);
+});
+
+app.get("/recv", function (req, res) {
+    if (!qs.parse(url.parse(req.url).query).since) {
+        res.send(JSON.stringify({error: "Must supply since parameter"}, 400));
+        return;
+    }
+    var id = qs.parse(url.parse(req.url).query).id;
+    var session;
+    if (id && sessions[id]) {
+        session = sessions[id];
+        session.poke();
+    }
+
+    var since = parseInt(qs.parse(url.parse(req.url).query).since, 10);
+
+    channel.query(since, function (messages) {
+        if (session) session.poke();
+        res.send(JSON.stringify({ messages: messages, rss: mem.rss }, 200));
+    });
+});
+
+app.get("/send", function (req, res) {
+    var id = qs.parse(url.parse(req.url).query).id;
+    var text = qs.parse(url.parse(req.url).query).text;
+
+    var session = sessions[id];
+    if (!session || !text) {
+        res.send(JSON.stringify({ error: "No such session id" }, 400));
+        return;
+    }
+
+    session.poke();
+
+    channel.appendMessage(session.nick, "msg", text);
+    res.send(JSON.stringify({ rss: mem.rss }, 200));
+});
+
+
 var mem = process.memoryUsage();
 // every 10 seconds poll for the memory.
 setInterval(function () {
-  mem = process.memoryUsage();
+    mem = process.memoryUsage();
 }, 10*1000);
 
 var sessions = {};
@@ -86,7 +133,7 @@ function createSession (nick) {
 }
 
 var MESSAGE_BACKLOG = 200,
-    SESSION_TIMEOUT = 60 * 1000;
+SESSION_TIMEOUT = 60 * 1000;
 
 var channel = new function () {
     var messages = [],
