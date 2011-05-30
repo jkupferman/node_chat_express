@@ -10,10 +10,11 @@ app.configure(function(){
     app.use(express.errorHandler({ dumpExceptions: true, showStack: true }));
     app.set('views', __dirname + '/views');
     app.set('views');
+    app.set('view engine', 'jade');
 });
 
 app.get('/', function(req, res){
-    res.send('Hello World');
+    res.render('index');
 });
 
 app.listen(3000);
