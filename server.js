@@ -36,6 +36,7 @@ if ( config.options.secure === true ) {
 		key: fs.readFileSync('conf/cert/nodechat.key'),
 		cert: fs.readFileSync('conf/cert/nodechat.crt')
 	});
+	app.use(express.cookieParser());
 	app.use(express.session({ key: 'nodechat.sid', secret: config.sess.secret, store: new RedisStore }));
 };
 
@@ -57,7 +58,6 @@ var starttime = (new Date()).getTime();
 app.configure(function(){
     app.use(express.logger());
     app.use(express.bodyParser());
-		app.use(express.cookieParser());
     app.use(express.methodOverride());
     app.use(app.router);
     app.use(express.static(__dirname + '/public'));
