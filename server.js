@@ -1,16 +1,63 @@
+var fs = require('fs');
 var express = require('express'),
-app = express.createServer();
+		app = express.createServer();
 
 var sys = require("sys");
 var url = require("url");
 var qs = require("querystring");
 
+var winston = require('winston');
+var logger = new (winston.Logger)({
+	transports: [
+		new (winston.transports.Console)(),
+		new (winston.transports.File)({ filename: 'nodechat.log' })
+	],
+	exceptionHandlers: [
+		new (winston.transports.File)({ filename: 'exceptions.log'})
+	]
+});
+
+var config = require('./conf/conf.js');
+
+if ( config.options.secure === true ) {
+	logger.info('Running as secure server');
+	var RedisStore = require('connect-redis')(express); 
+	var crypto = require('crypto');
+
+	var Client = require('mysql').Client;
+	var client = new Client();
+	//mySQL user and server info
+	client.user = config.db.user;
+	client.password = config.db.password;
+	client.host = config.db.host;
+	client.port = config.db.port;
+
+	app = require('express').createServer({ 
+		key: fs.readFileSync('conf/cert/nodechat.key'),
+		cert: fs.readFileSync('conf/cert/nodechat.crt')
+	});
+	app.use(express.session({ key: 'nodechat.sid', secret: config.sess.secret, store: new RedisStore }));
+};
+
+if ( config.loggly.use === true ) {
+	logger.add(winston.transports.Loggly, {
+		subdomain: config.loggly.subdomain,
+		inputToken: config.loggly.inputToken,
+		handleExceptions: true
+	});
+
+	logger.handleExceptions();
+};
+
 // when the daemon started
 var starttime = (new Date()).getTime();
+
+//Load configuration settings from external file.
 
 app.configure(function(){
     app.use(express.logger());
     app.use(express.bodyParser());
+		app.use(express.cookieParser());
     app.use(express.methodOverride());
     app.use(app.router);
     app.use(express.static(__dirname + '/public'));
@@ -20,18 +67,61 @@ app.configure(function(){
     app.set('view engine', 'jade');
 });
 
-app.get('/', function(req, res){
-    res.render('index');
+app.get('/', requiresLogin, function(req, res){
+    res.render('index', {
+			secure: config.options.secure
+		});
 });
 
-app.get('/join', function(req, res){
+if ( config.options.secure === true ) {
+	app.post('/login', function(req, res) {
+		authenticate(req.body.login, req.body.password, function(user) {
+			if (user) {
+				req.session.user = user.login;
+				req.session.community = user.comm;
+				req.session.level = user.level;
+				res.redirect('/');
+			} else {
+				res.send(403);
+			}
+		})
+	});
+
+	app.post('/newuser', requiresLogin, function(req, res) {
+		var cipher = crypto.createCipher('blowfish', req.body.password);
+		var pass = cipher.final('base64');
+		var values = [req.body.login, pass];
+		client.query("INSERT INTO login SET login = ?, password = ?", values,
+		function(error, results) {
+			if(error) {
+				logger.error(error);
+				logger.error(req.session);
+				res.send('Fail! Error was: ' + error.message);
+			} else {
+				logger.info('New user added by ' + req.session.user);
+				res.send('User created successfully.');
+			}
+		});
+	});
+
+	app.get('/newuser', requiresLogin, function(req, res) {
+		res.render('newuser');
+	});
+};
+
+app.get('/join', requiresLogin, function(req, res){
     res.contentType('json');
 
-    var nick = qs.parse(url.parse(req.url).query).nick;
-    if (nick == null || nick.length == 0) {
-        res.send(JSON.stringify({error: "Bad nick."}, 400));
-        return;
-    }
+		if ( config.options.secure === true ) {
+			var nick = req.session.user
+		} else {
+			var nick = qs.parse(url.parse(req.url).query).nick;
+			if (nick == null || nick.length == 0) {
+					res.send(JSON.stringify({error: "Bad nick."}, 400));
+					return;
+			}
+		}
+
     var session = createSession(nick);
     if (session == null) {
         res.send(JSON.stringify({error: "Nick in use."}, 400));
@@ -49,7 +139,7 @@ app.get('/join', function(req, res){
                             200));
 });
 
-app.get("/part", function (req, res) {
+app.get("/part", requiresLogin, function (req, res) {
     var id = qs.parse(url.parse(req.url).query).id;
     var session;
     if (id && sessions[id]) {
@@ -59,7 +149,7 @@ app.get("/part", function (req, res) {
     res.send(JSON.stringify({ rss: mem.rss }), 200);
 });
 
-app.get("/recv", function (req, res) {
+app.get("/recv", requiresLogin, function (req, res) {
     if (!qs.parse(url.parse(req.url).query).since) {
         res.send(JSON.stringify({error: "Must supply since parameter"}, 400));
         return;
@@ -79,7 +169,7 @@ app.get("/recv", function (req, res) {
     });
 });
 
-app.get("/send", function (req, res) {
+app.get("/send", requiresLogin, function (req, res) {
     var id = qs.parse(url.parse(req.url).query).id;
     var text = qs.parse(url.parse(req.url).query).text;
 
@@ -92,6 +182,7 @@ app.get("/send", function (req, res) {
     session.poke();
 
     channel.appendMessage(session.nick, "msg", text);
+		logger.info("User: " + session.nick + " said: " + text);
     res.send(JSON.stringify({ rss: mem.rss }, 200));
 });
 
@@ -193,7 +284,93 @@ var channel = new function () {
     }, 3000);
 };
 
+setInterval( function() {
+	var date = new Date();
+	var cutoff = date.getTime() - SESSION_TIMEOUT;
+	for ( var i in sessions ) {
+		if ( sessions[i].timestamp.getTime() < cutoff ) {
+			sessions[i].destroy();
+		}
+	}
+}, 10 * 1000 );
 
+function requiresLogin(req, res, next) {
+	if ( config.options.secure === true ) {
+		if (req.session.user) {
+			next();
+		} else {
+			//res.redirect('/login');
+			res.render('login');
+		}
+	} else {
+		next();
+	}
+};
 
-app.listen(3000);
-console.log('Express server started on port %s', app.address().port);
+function authenticate(login, password, callback) {
+	var cipher = crypto.createCipher('blowfish', password);
+	var pass = cipher.final('base64');
+	var values = [login, pass];
+	client.query("SELECT * FROM login WHERE login = ? AND password = ?", values,
+							 function(error, results) {
+								 if(error) {
+									 logger.error(error)
+									 logger.error(req.session);
+								 } else {
+									 var user = results[0];
+									 if (!user) {
+										 callback(null);
+										 return;
+									 } else {
+										 callback(user);
+										 return;
+									 }
+								 }
+							 });
+};
+
+if ( config.options.secure === true ) {
+	client.connect(function(error, results) {
+		if(error) {
+			logger.error('MySQL Connection Error: ' + error.message);
+			return;
+		}
+		logger.info('Connected to MySQL');
+		//Select the DB
+		ClientConnectionReady(client);
+	});
+
+	// Selects the database
+	ClientConnectionReady = function(client)
+	{
+			client.query('USE ' + config.db.dbname, function(error, results) {
+					if(error) {
+							logger.error('ClientConnectionReady Error: ' + error.message);
+							client.end();
+							return;
+					} else {
+							logger.info('Database Selected');
+							app.listen(3000);
+							console.log('Express server started on port %s', app.address().port);
+				pingDB();
+					}
+			});
+	};
+} else {
+	app.listen(3000);
+	console.log('Express server started on port %s', app.address().port);
+};
+function pingDB() {
+    setInterval( function() {
+			client.query('USE ' + config.db.dbname, function(error, results) {
+	   if(error) {
+	       logger.error('Database Selection Error: ' + error.message);
+	       client.end();
+	       return;
+	   } else {
+	       logger.info('Database Re-Selected');            
+	   }
+       });
+    }, 60 * 1000 )
+};
+

@@ -1,0 +1,25 @@
+var config = {}
+
+config.options = {
+	secure: false
+};
+
+config.sess = {
+	secret: ''
+};
+
+config.db = {
+	user: '',
+	password: '',
+	host: '',
+	port: 3306,
+	dbname: ''
+};
+
+config.loggly = {
+	use: false,
+	subdomain: '',
+	inputToken: ''
+};
+
+module.exports = config;
