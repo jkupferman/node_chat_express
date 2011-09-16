@@ -4,5 +4,7 @@ To install it you need the express framework and jade templating language:
 npm install express
 npm install jade
 
+To require users to login, you will need a mySQL database and a redis instance.
+
 To run it:
 node server.js
